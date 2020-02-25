@@ -50,17 +50,21 @@ impl<T: api::Tracer + 'static> OpentelemetryLayer<T> {
         if let Some(parent) = attrs.parent() {
             let span = ctx.span(parent).expect("Span not found, this is a bug");
             let extensions = span.extensions();
-            extensions
-                .get::<T::Span>()
-                .map(|otel_span| otel_span.get_context())
+            extensions.get::<api::SpanContext>().cloned().or_else(|| {
+                extensions
+                    .get::<T::Span>()
+                    .map(|otel_span| otel_span.get_context())
+            })
         // Else if the span is inferred from context, look up any available current span.
         } else if attrs.is_contextual() {
             ctx.current_span().id().and_then(|span_id| {
                 let span = ctx.span(span_id).expect("Span not found, this is a bug");
                 let extensions = span.extensions();
-                extensions
-                    .get::<T::Span>()
-                    .map(|otel_span| otel_span.get_context())
+                extensions.get::<api::SpanContext>().cloned().or_else(|| {
+                    extensions
+                        .get::<T::Span>()
+                        .map(|otel_span| otel_span.get_context())
+                })
             })
         // Explicit root spans should have no parent context.
         } else {
@@ -112,14 +116,23 @@ where
     /// Creates an `OpenTelemetry` `Span` for the corresponding `tracing` `Span`.
     /// This will attempt to parse the parent context if possible from the given attributes.
     fn new_span(&self, attrs: &Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        let span = ctx.span(id).expect("Span not found, this is a bug");
-        let mut extensions = span.extensions_mut();
+        if let None = ctx.current_span().id() {
+            if let None = attrs.parent() {
+                if let None = attrs.metadata().fields().field("root") {
+                    return;
+                }
+            }
+        }
+        if let None = attrs.metadata().fields().field("follower") {
+            let span = ctx.span(id).expect("Span not found, this is a bug");
+            let mut extensions = span.extensions_mut();
 
-        let span_context = self.parse_context(attrs, &ctx);
-        let mut span = self.tracer.start(attrs.metadata().name(), span_context);
+            let span_context = self.parse_context(attrs, &ctx);
+            let mut span = self.tracer.start(attrs.metadata().name(), span_context);
 
-        attrs.record(&mut SpanAttributeVisitor(&mut span));
-        extensions.insert(span);
+            attrs.record(&mut SpanAttributeVisitor(&mut span));
+            extensions.insert(span);
+        }
     }
 
     /// Record values for the given span.
